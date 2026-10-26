@@ -233,6 +233,6 @@ MIT. Original `muxkit` © 2024 [LatosProject](https://github.com/LatosProject);
 this fork © 2026 南清 (NanQing). Both notices are kept in [LICENSE](LICENSE); no
 upstream source code is included.
 
-## Powered by dsh
+---
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

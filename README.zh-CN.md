@@ -205,6 +205,6 @@ PS C:\Users\me>                         │
 MIT。原 `muxkit` © 2024 [LatosProject](https://github.com/LatosProject)；本 fork © 2026
 南清。两段声明都保留在 [LICENSE](LICENSE) 中；仓库不包含上游源代码。
 
-## Powered by dsh
+---
 
 [![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
