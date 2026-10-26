@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Unit tests
+        run: cargo test --lib
+
+      - name: Daemon end-to-end (attach / echo / detach / reattach)
+        run: cargo test --test e2e
+
+      # The client test drives a real console: ConPTY on Windows, /dev/tty on
+      # Unix. A GitHub-hosted Linux runner has no controlling terminal, so this
+      # test only runs on Windows, where ConPTY is exactly what it exercises.
+      - name: Client end-to-end (real ConPTY)
+        if: runner.os == 'Windows'
+        run: cargo test --test client_e2e
