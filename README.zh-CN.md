@@ -2,6 +2,8 @@
 
 **[English](README.md) | 中文**
 
+[![CI](https://github.com/NanQing233/MUXKIT/actions/workflows/ci.yml/badge.svg)](https://github.com/NanQing233/MUXKIT/actions/workflows/ci.yml)
+
 轻量级终端复用器 —— 使用 Rust 重写以原生适配 Windows（ConPTY），在 Unix 上通过 pty
 运行。会话在 detach 后继续运行：daemon 持有 pty 与终端状态，所以 `mk -s <id>` 能在你
 离开的地方重新渲染会话。
@@ -20,7 +22,7 @@
 | | 上游 `muxkit` | 本 fork |
 |---|---|---|
 | Windows | 不支持（仅 POSIX：`posix_openpt`、Unix socket、`termios`、`SCM_RIGHTS`） | **原生**，`ConPTY` + 命名管道 + 控制台 VT 模式 |
-| Unix | 主要目标 | pty / `termios` / Unix domain socket；共享同一套代码，已通过 `cargo check` 校验，但尚未在 Linux 上运行 |
+| Unix | 主要目标 | pty / `termios` / Unix domain socket；共享同一套代码，CI 在 Ubuntu 上构建并测试 |
 | 语言 / 构建 | C + CMake，内置 `libvterm` | Rust + Cargo；在 Windows 上只需 MSVC 工具链 |
 
 **架构**
@@ -166,6 +168,9 @@ tests/client_e2e.rs  真客户端跑在真 ConPTY 里
 cargo test          # 67 个单测 + 2 个集成测试，Windows 上全绿
 ```
 
+CI 每次 push 都会在 `windows-latest`（全套，含真实 ConPTY 的 client 测试）和
+`ubuntu-latest`（构建 + 单测 + daemon 端到端测试）上跑同一套用例。
+
 - [`tests/e2e.rs`](tests/e2e.rs) —— 真 daemon + 真 IPC：attach → `echo` → detach →
   reattach，断言标记文本在重新接回后仍在屏幕上（会话持久化），最后干净退出。
 - [`tests/client_e2e.rs`](tests/client_e2e.rs) —— 真的 `mk` 客户端跑在真的 **ConPTY**
@@ -187,9 +192,9 @@ PS C:\Users\me>                         │
 
 ## 状态与已知限制
 
-- Unix 分支与 Windows 共享全部代码，且通过了
-  `cargo check --all-targets --target x86_64-unknown-linux-gnu`；但尚未在真实 Linux
-  机器上构建或运行（本 fork 在 Windows 上开发）。
+- Unix 分支与 Windows 共享全部代码，CI 每次 push 都会在 Ubuntu runner 上构建并测试：
+  单测 + daemon 的 attach/echo/detach/reattach 测试。**client 本身**仍只在 Windows 上
+  跑过，因为托管 Linux runner 没有 `/dev/tty` 所需的控制终端。
 - 只支持垂直分屏（与上游一致）；没有鼠标，没有 copy-mode 翻页。
 - resize 时是截断 / 补白，不做按词重排。
 - 一个会话同时只能挂一个客户端（新的 attach 会把旧的踢掉），与 tmux 一致。

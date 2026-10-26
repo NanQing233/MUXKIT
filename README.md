@@ -2,6 +2,8 @@
 
 **English | [中文](README.zh-CN.md)**
 
+[![CI](https://github.com/NanQing233/MUXKIT/actions/workflows/ci.yml/badge.svg)](https://github.com/NanQing233/MUXKIT/actions/workflows/ci.yml)
+
 Lightweight terminal multiplexer — a Rust rewrite for native Windows support
 (ConPTY); also runs on Unix via ptys. Sessions survive detaching: the daemon keeps
 the pty and the terminal state, so `mk -s <id>` re-renders the session where you
@@ -23,7 +25,7 @@ Same user-facing design as upstream — sessions, panes, scrollback, status bar,
 | | upstream `muxkit` | this fork |
 |---|---|---|
 | Windows | not supported (POSIX-only: `posix_openpt`, Unix sockets, `termios`, `SCM_RIGHTS`) | **native**, `ConPTY` + named pipes + console VT modes |
-| Unix | primary target | pty / `termios` / Unix domain socket; shares the same code, `cargo check`-verified but not yet run on Linux |
+| Unix | primary target | pty / `termios` / Unix domain socket; shares the same code and is built and tested in CI on Ubuntu |
 | Language / build | C + CMake, vendored `libvterm` | Rust + Cargo; on Windows only the MSVC toolchain is needed |
 
 **Architecture**
@@ -186,6 +188,10 @@ tests/client_e2e.rs  the real client inside a real ConPTY
 cargo test          # 67 unit tests + 2 integration tests, all green on Windows
 ```
 
+CI runs the same suite on `windows-latest` (full, including the real-ConPTY
+client test) and on `ubuntu-latest` (build, unit tests and the daemon end-to-end
+test) on every push.
+
 - [`tests/e2e.rs`](tests/e2e.rs) — real daemon over real IPC: attach → `echo` →
   detach → reattach, asserting the marker text is still on screen after
   reattaching (session persistence), then a clean shutdown.
@@ -211,9 +217,11 @@ PS C:\Users\me>                         │
 
 ## Status / known limits
 
-- Unix support shares the whole codebase and passes
-  `cargo check --all-targets --target x86_64-unknown-linux-gnu`, but has not been
-  built or run on a real Linux machine yet (this fork was developed on Windows).
+- Unix support shares the whole codebase and is built and tested in CI on an
+  Ubuntu runner on every push: unit tests plus the daemon
+  attach/echo/detach/reattach test. The *client* itself has still only been
+  exercised on Windows, because a hosted Linux runner has no controlling
+  terminal for `/dev/tty`.
 - Vertical splits only (same as upstream); no mouse, no copy-mode pager.
 - Reflow on resize is truncate/pad, not word reflow.
 - One attached client per session (a new attach detaches the old one), like tmux.
