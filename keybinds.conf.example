@@ -1,0 +1,28 @@
+# muxkit keybindings
+#
+# Copy to %LOCALAPPDATA%\muxkit\keybinds.conf (Windows)
+# or        ~/.config/muxkit/keybinds.conf       (Unix)
+#
+# Format:  <prefix> <key> <action>
+# Lines are comments with '#'. Anything you do not override keeps its default.
+
+# prefix d  detach from the session (keep it running)
+prefix d detach_session
+
+# prefix %  split the current pane in two (vertical)
+prefix % split_vertical
+
+# prefix o  focus the next pane
+prefix o next_pane
+
+# prefix [  scroll the scrollback up
+prefix [ scroll_up
+
+# prefix ]  scroll back down to the live screen
+prefix ] scroll_down
+
+# prefix s  toggle synchronized input to all panes
+prefix s sync_input
+
+# prefix q  kill the session
+prefix q kill_session

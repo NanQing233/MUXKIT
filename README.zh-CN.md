@@ -1,281 +1,203 @@
-# muxkit
+# muxkit-rs
 
-**[English](README.md) | [中文](README.zh-CN.md)**
+**[English](README.md) | 中文**
 
----
+轻量级终端复用器 —— 使用 Rust 重写以原生适配 Windows（ConPTY），在 Unix 上通过 pty
+运行。会话在 detach 后继续运行：daemon 持有 pty 与终端状态，所以 `mk -s <id>` 能在你
+离开的地方重新渲染会话。
 
-欢迎使用 **muxkit**！
+**这是一个 fork。** 本项目是 [muxkit](https://github.com/LatosProject/MUXKIT) 的 Rust
+重写（MIT，© 2024 LatosProject；不是上游项目，也未获其背书）。主要变更就是这次重写：
+使用 Rust 以原生适配 Windows —— 上游只支持 POSIX（`posix_openpt`、Unix socket、
+`termios`、`SCM_RIGHTS`）。
 
-muxkit 是一个用 C 语言编写的轻量级终端复用器。它允许在单个屏幕中创建、访问和控制多个终端会话。muxkit 会话可以从屏幕分离并在后台继续运行，之后再重新附加。
+## 本 fork 改了什么
 
-### 功能特性
+用户可见的设计与上游一致——会话、分屏、回滚、状态栏、`Ctrl+B` 前缀键——差异如下。
 
-- ✨ **会话管理** - 创建、分离和重新附加终端会话
-- 🪟 **多窗格支持** - 垂直分割终端窗口为多个窗格
-- 📜 **历史回滚** - 通过历史滚动查看终端输出
-- 🌏 **国际化** - 内置英文和中文语言支持
-- 🚀 **轻量级** - 最小依赖，快速启动
-- 🔒 **守护进程模式** - 服务器作为后台守护进程运行
-- 💾 **会话持久化** - 分离时保留屏幕状态
+**平台**
 
-### 依赖项
+| | 上游 `muxkit` | 本 fork |
+|---|---|---|
+| Windows | 不支持（仅 POSIX：`posix_openpt`、Unix socket、`termios`、`SCM_RIGHTS`） | **原生**，`ConPTY` + 命名管道 + 控制台 VT 模式 |
+| Unix | 主要目标 | pty / `termios` / Unix domain socket；共享同一套代码，已通过 `cargo check` 校验，但尚未在 Linux 上运行 |
+| 语言 / 构建 | C + CMake，内置 `libvterm` | Rust + Cargo；在 Windows 上只需 MSVC 工具链 |
 
-muxkit 依赖以下库：
+**架构**
 
-- **libvterm** - 终端模拟器库（包含在 `vendor/` 目录）
-- **标准 C 库** - POSIX 兼容系统
+- **终端状态由 daemon 持有。** 上游是 client 持有 PTY 和自己的网格，再用 `SCM_RIGHTS`
+  把文件描述符传给 server —— 这在 Windows 上无法表达，所以本 fork 反转了模型：server
+  解析 VT 字节流、保存每个 pane 的网格与回滚，client 只负责画帧和转发输入字节。余下的
+  平台相关代码很少，且以 `cfg` 集中在 `tty.rs`、`pty.rs`、`ipc.rs`、`keys.rs`、
+  `client.rs` 中；协议、终端状态、画布与按键处理是共享的。这也是 detach/attach 后会话
+  屏幕能保持原样的原因。
+- **IPC 采用长度前缀的 JSON 协议**，跑在命名管道（Windows）或 Unix domain socket
+  （`interprocess`）上，替代手写消息 + FD 传递。单帧上限 16 MiB；可用 `MUXKIT_NAME`
+  覆盖端点名（测试在用）。
+- **终端仿真采用 `vte` + 自研格子**，不再内置 `libvterm`。回滚、SGR（含 256 色与
+  RGB）、DECSTBM、备用屏（`?1049`）、宽字符（中日韩）与光标状态都在
+  [`src/term.rs`](src/term.rs) 中实现。DA1 / DSR / CPR 查询会回包子进程；上游不回，
+  因此等待这类回包的程序可能阻塞。
+- **渲染改为脏区差分。** 上游每格一次 `write()` 重画整个 pane。在本机 80×24 pane 上
+  实测：约每帧 1,900 次 `write()`，显示一个字节的 shell 输出约 7,900 次。本 fork 把各
+  pane、边框、状态栏合成一张画布，与上一帧逐行比对，每帧只留下**一次带缓冲的写入**
+  （Windows 上实际是一次 `WriteFile`）。见 [`src/canvas.rs`](src/canvas.rs) 与
+  [`src/server.rs`](src/server.rs)。
 
-构建 muxkit 需要：
-- C 编译器（gcc 或 clang）
-- CMake 3.10 或更高版本
-- make
+**功能与行为**
 
-### 安装
+- 已实现：会话（新建 / 列表 / attach / kill）、垂直分屏、回滚、同步输入、daemon 模式、
+  detach 后会话常驻、`Ctrl+B` 前缀、从配置文件读键位。
+- Windows 的输入走 `ENABLE_VIRTUAL_TERMINAL_INPUT`，两个平台喂给按键状态机的都是同一份
+  原始字节流；不存在单独的 Windows 按键事件分支。
+- 窗口尺寸变化用轮询检测，因为 Windows 没有 `SIGWINCH`。
+- 配置路径改为 `%LOCALAPPDATA%\muxkit\keybinds.conf`（Windows）/
+  `~/.config/muxkit/keybinds.conf`（Unix）；上游是
+  `~/.local/share/muxkit/muxkit-<uid>/keybinds.conf`。上游的动作名仍然可用
+  （`new_pane` 是 `split_vertical` 的别名），已有的 `keybinds.conf` 可原样继续使用。
+- daemon 不写 `client.log` / `server.log`；没有会话也没有客户端时，空闲 3 秒自动退出。
+- **上游功能中未实现的一项：** 中英文界面翻译（`i18n`）—— 状态栏只有英文。上游功能
+  列表中的其余项均已实现。
+- 两版都没有、不属于回退：鼠标支持、copy-mode、水平 / `tmux` 风格布局、窗口重排。
 
-#### Homebrew (macOS / Linux)
+**二进制与命令行**
 
-```bash
-brew tap LatosProject/muxkit https://github.com/LatosProject/muxkit.git
-brew install muxkit
+- 二进制名为 `mk`（上游是 `muxkit`）。`-l`、`-s <id>`、`-k <id>`、`-h` 与上游一致；
+  本 fork 另有 `-S`（前台运行 daemon）与 `--shell <cmd>`。
+- 本机实测：release 二进制约 981 KiB，空闲 daemon 约 10 MiB RSS；上游 C 实现用
+  `gcc -O2` 在本机编译后为 131 KiB、约 1.3 MiB。差异来自 Rust 运行时、`serde` 与
+  ConPTY 管线；换来的是 VT 解析器、格子与画布中不含 `unsafe` 代码，以及把 Windows
+  作为一等目标。
+
+## 构建
+
+```powershell
+cargo build --release      # -> target\release\mk.exe
+cargo test                 # 67 个单测 + 2 个集成测试
 ```
 
-#### AUR (Arch Linux)
+Windows 上只需要 Rust（MSVC 工具链）。ConPTY 需要 Windows 10 1809+。
 
-```bash
-# 使用 AUR 助手（如 yay）
-yay -S muxkit
+在 Windows 上对 Unix 分支做类型检查（不需要链接器）：
 
-# 或手动安装
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit/aur
-makepkg -si
+```powershell
+rustup target add x86_64-unknown-linux-gnu
+cargo check --all-targets --target x86_64-unknown-linux-gnu
 ```
 
-#### Debian / Ubuntu
+## 使用
 
-```bash
-# 从源码构建 .deb 包
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit
-dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../muxkit_0.4.4-1_*.deb
+```powershell
+mk                 # 新建会话（首次会自动拉起 daemon）
+mk -l              # 列出会话
+mk -s 0            # 接回会话 0
+mk -k 0            # 杀掉会话 0
 ```
 
-#### Fedora / RHEL
+按键（前缀 = `Ctrl+B`）：
 
-```bash
-# 安装构建依赖
-sudo dnf install cmake gcc make
+| 按键 | 动作 |
+|---|---|
+| `prefix d` | detach（会话继续在后台跑） |
+| `prefix %` | 垂直分屏 |
+| `prefix o` | 切换到下一个 pane |
+| `prefix [` / `]` | 回滚向上 / 向下 |
+| `prefix s` | 开关同步输入 |
+| `prefix q` | 杀掉会话 |
+| `Ctrl+B Ctrl+B` | 发送一个真正的 `Ctrl+B` |
 
-# 从源码构建并安装
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-sudo install -m 755 build/muxkit /usr/local/bin/muxkit
-```
+键位可在 `%LOCALAPPDATA%\muxkit\keybinds.conf` 覆盖，参考
+[`keybinds.conf.example`](keybinds.conf.example)：
 
-#### 从源码编译
-
-从源码构建和安装 muxkit：
-
-```bash
-# 克隆仓库
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit
-
-# 构建
-cmake -B build -S .
-cmake --build build
-
-# 安装（可选）
-sudo cp build/muxkit /usr/local/bin/
-```
-
-#### 平台特定说明
-
-- **macOS**：使用 Xcode 命令行工具即可直接运行
-- **Linux**：需要安装 build-essential 软件包
-
-### 使用方法
-
-#### 基本命令
-
-```bash
-# 启动新会话
-muxkit
-
-# 列出所有会话
-muxkit -l
-
-# 附加到分离的会话（会话 ID 为 0）
-muxkit -s 0
-
-# 终止会话
-muxkit -k 0
-
-# 显示帮助
-muxkit -h
-```
-
-#### 快捷键
-
-所有命令都以 `Ctrl+B` 为前缀：
-
-| 组合键 | 功能 |
-|--------|------|
-| `Ctrl+B` `d` | 分离当前会话 |
-| `Ctrl+B` `%` | 垂直分割窗格 |
-| `Ctrl+B` `o` | 切换到下一窗格 |
-| `Ctrl+B` `[` | 向上滚动（查看历史） |
-| `Ctrl+B` `]` | 向下滚动 |
-| `Ctrl+B` `s` | 切换同步输入模式 |
-| `Ctrl+B` `Ctrl+B` | 发送 Ctrl+B 到 shell |
-
-**注意**：按 `Esc` 或 `q` 退出滚动模式。
-
-### 配置
-
-配置文件位于 `~/.local/share/muxkit/muxkit-<uid>/`：
-- `keybinds.conf` - 自定义快捷键（可选）
-
-`keybinds.conf` 示例：
 ```
 prefix d detach_session
-prefix % new_pane
-prefix o next_pane
-prefix [ scroll_up
-prefix ] scroll_down
+prefix % split_vertical
 ```
 
-可用的操作：
-- `detach_session` - 分离会话
-- `new_pane` - 新建窗格
-- `next_pane` - 切换到下一个窗格
-- `scroll_up` - 向上滚动查看历史
-- `scroll_down` - 向下滚动
-- `sync_input` - 切换同步输入模式（竖线光标）
-
-### 项目结构
+## 架构
 
 ```
-muxkit/
-├── src/
-│   ├── core/       # 主入口
-│   ├── client/     # 客户端逻辑
-│   ├── server/     # 服务器守护进程
-│   ├── ui/         # 渲染和输入
-│   └── common/     # 共享工具
-├── include/        # 头文件
-├── vendor/         # 第三方库（libvterm）
-└── CMakeLists.txt  # 构建配置
+   终端（Windows Terminal / conhost / xterm）
+        │  ANSI 帧（只发变化的行）              ▲ 原始输入字节
+        ▼                                       │
+   ┌───────────────────── 客户端（mk）─────────┴────────────┐
+   │  tty.rs: 控制台 raw 模式、备用屏、尺寸轮询              │
+   │  keys.rs: Ctrl+B 状态机                                │
+   └───────────────┬────────────────────────────────────────┘
+                   │ 本地 IPC：命名管道 / Unix domain socket
+                   │ 长度前缀 JSON 帧（proto.rs）
+                   ▼
+   ┌──────────────────── daemon ────────────────────────────┐
+   │  server.rs: 所有会话的唯一持有者                        │
+   │  term.rs:   VT 解析 -> 格子 + 回滚                      │
+   │  canvas.rs: 合成 pane/边框/状态栏并差分                 │
+   │  pty.rs:    ConPTY / pty 子进程 + 读线程                │
+   └───────────────┬────────────────────────────────────────┘
+                   ▼
+              shell（pwsh.exe / bash）
 ```
 
-### 架构设计
+Windows 相关的实现主要在两个文件：[`src/tty.rs`](src/tty.rs)（控制台模式 +
+`ENABLE_VIRTUAL_TERMINAL_*`，让输入输出都是纯 VT 字节流）和
+[`src/pty.rs`](src/pty.rs)（portable-pty 的 ConPTY 后端）；其余平台差异是
+`client.rs`、`ipc.rs`、`keys.rs` 中少量 `cfg` 分支。
+
+## 目录结构
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                      终端                            │
-└──────────────────────────────────────────────────────┘
-                        │
-                        ▼
-┌──────────────────────────────────────────────────────┐
-│                   客户端进程                         │
-│  ┌────────┐  ┌──────────┐  ┌──────────────────────┐  │
-│  │ Raw    │  │ 事件循环 │  │ 信号处理             │  │
-│  │ 模式   │  │          │  │ (SIGWINCH/SIGCHLD)   │  │
-│  └────────┘  └──────────┘  └──────────────────────┘  │
-└──────────────────────────────────────────────────────┘
-                        │
-                Unix 域套接字
-                        │
-                        ▼
-┌──────────────────────────────────────────────────────┐
-│               服务器进程（守护进程）                 │
-│  ┌────────┐  ┌──────────┐  ┌──────────────────────┐  │
-│  │ 会话   │  │ 事件循环 │  │ 子进程监控           │  │
-│  │ 管理器 │  │          │  │ (SIGCHLD)            │  │
-│  └────────┘  └──────────┘  └──────────────────────┘  │
-└──────────────────────────────────────────────────────┘
-                        │
-                  PTY 主/从端
-                        │
-                        ▼
-┌──────────────────────────────────────────────────────┐
-│                   Shell 进程                         │
-│                 (bash/zsh/sh)                        │
-└──────────────────────────────────────────────────────┘
+src/main.rs      命令行入口
+src/client.rs    attach/detach/list/kill、画帧、转发输入
+src/server.rs    daemon 引擎、会话、pane、帧泵
+src/proto.rs     共享的格子模型 + 协议消息（契约）
+src/term.rs      VT 仿真：格子、SGR、回滚、备用屏、查询回包
+src/canvas.rs    画布合成、行差分、ANSI 编码
+src/pty.rs       PTY/ConPTY 子进程管理
+src/tty.rs       控制台 raw 模式、VT 模式、尺寸、resize 监听
+src/keys.rs      前缀键位 + 配置文件
+src/ipc.rs       命名管道 / UDS 传输 + 帧封装
+src/layout.rs    pane 矩形计算
+tests/e2e.rs     daemon 协议、detach/reattach 持久化
+tests/client_e2e.rs  真客户端跑在真 ConPTY 里
 ```
 
-### 贡献
+## 验证
 
-欢迎提交 Bug 报告、功能建议和代码贡献！
-
-请在以下地址提交 GitHub issue 或 pull request：
 ```
-https://github.com/LatosProject/muxkit
+cargo test          # 67 个单测 + 2 个集成测试，Windows 上全绿
 ```
 
-贡献前请：
-1. 阅读现有文件中的代码风格
-2. 添加适当的注释和文档
-3. 充分测试您的更改
+- [`tests/e2e.rs`](tests/e2e.rs) —— 真 daemon + 真 IPC：attach → `echo` → detach →
+  reattach，断言标记文本在重新接回后仍在屏幕上（会话持久化），最后干净退出。
+- [`tests/client_e2e.rs`](tests/client_e2e.rs) —— 真的 `mk` 客户端跑在真的 **ConPTY**
+  里，它输出的 ANSI 再由 `term.rs` 解析回来断言：状态栏已绘制、键入的输入到达 shell、
+  输出能够返回、`Ctrl+B %` 开出第二个 pane、`Ctrl+B o` 切换焦点、`Ctrl+B d` detach
+  之后 daemon 仍保留会话。
+- 单测覆盖 VT 解析（SGR / 擦除 / 回滚 / 宽字符 / 备用屏、CPR + DA1 回包）、画布差分与
+  ANSI 编码（每个 run 一个转义，而非每格一个）、前缀状态机、配置解析和 IPC 帧封装。
 
-### 文档
+上面那个 ConPTY 测试跑出来的真实屏幕快照（两个 pane 里的 PowerShell 7）：
 
-详细的 API 文档请参见 `include/` 目录下的头文件：
-- `window.h` - 窗口和窗格管理
-- `render.h` - 终端渲染
-- `client.h` - 客户端状态机
-- `server.h` - 服务器守护进程
-
-生成 Doxygen 文档：
-```bash
-doxygen Doxyfile
+```
+PowerShell 7.6.8                        │
+PS C:\Users\me> echo CLIENT_SIDE_OK     │
+CLIENT_SIDE_OK                          │
+PS C:\Users\me>                         │
+ mk | session 0 | pane 1/2 | 2 panes | C:\Program Files\WindowsApps\Microsoft.Po
 ```
 
-### 调试
+## 状态与已知限制
 
-使用详细日志运行 muxkit。日志文件将创建在 `~/.local/share/muxkit/muxkit-<uid>/`：
-- `client.log` - 客户端日志
-- `server.log` - 服务器日志
+- Unix 分支与 Windows 共享全部代码，且通过了
+  `cargo check --all-targets --target x86_64-unknown-linux-gnu`；但尚未在真实 Linux
+  机器上构建或运行（本 fork 在 Windows 上开发）。
+- 只支持垂直分屏（与上游一致）；没有鼠标，没有 copy-mode 翻页。
+- resize 时是截断 / 补白，不做按词重排。
+- 一个会话同时只能挂一个客户端（新的 attach 会把旧的踢掉），与 tmux 一致。
+- OSC 52 剪贴板和超链接会解析但被忽略。
 
-查看调试日志：
-```bash
-tail -f ~/.local/share/muxkit/muxkit-$(id -u)/client.log
-tail -f ~/.local/share/muxkit/muxkit-$(id -u)/server.log
-```
+## 许可证
 
-### 技术细节
+MIT。原 `muxkit` © 2024 [LatosProject](https://github.com/LatosProject)；本 fork © 2026
+南清。两段声明都保留在 [LICENSE](LICENSE) 中；仓库不包含上游源代码。
 
-| 技术 | 说明 |
-|------|------|
-| **PTY（伪终端）** | 使用 `posix_openpt`、`grantpt`、`ptsname` 创建虚拟终端对 |
-| **Unix 域套接字** | 客户端与服务端之间的本地进程间通信 |
-| **文件描述符传递** | 通过 `SCM_RIGHTS` 跨进程传递文件描述符 |
-| **信号处理** | `SIGCHLD` 监控子进程退出，`SIGWINCH` 响应窗口大小变化 |
-| **守护进程** | Double-fork 模式创建后台服务进程 |
-| **termios** | 终端 raw 模式控制，禁用行缓冲和回显 |
-| **libvterm** | 终端模拟库，解析转义序列，维护屏幕缓冲区 |
-
-### 参考资料
-
-本项目参考了 [tmux](https://github.com/tmux/tmux) 的设计思想，适合学习 Unix 系统编程。
-
-涉及的知识点：
-- 《Advanced Programming in the UNIX Environment》(APUE)
-- POSIX 标准 PTY 接口
-- Unix 域套接字编程
-- 守护进程创建
-
-### 许可证
-
-MIT License - Copyright (c) 2024 LatosProject
-
-详情请见 [LICENSE](LICENSE) 文件。
-
----
-
-**版本**: 0.4.4
-**作者**: LatosProject
-**主页**: https://github.com/LatosProject/muxkit
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)

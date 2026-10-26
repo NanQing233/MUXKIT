@@ -1,272 +1,228 @@
-# muxkit
+# muxkit-rs
 
-**[English](README.md) | [中文](README.zh-CN.md)**
+**English | [中文](README.zh-CN.md)**
 
-<img width="64" height="64" alt="logo" src="https://github.com/user-attachments/assets/c309e7ee-2f5c-466b-9270-aaf81e58e26a" />
+Lightweight terminal multiplexer — a Rust rewrite for native Windows support
+(ConPTY); also runs on Unix via ptys. Sessions survive detaching: the daemon keeps
+the pty and the terminal state, so `mk -s <id>` re-renders the session where you
+left it.
 
----
-Welcome to **muxkit**!
+**This is a fork.** It is a Rust rewrite of
+[muxkit](https://github.com/LatosProject/MUXKIT) (MIT, © 2024 LatosProject; not
+the upstream project, not endorsed by it). The main change is the rewrite: Rust,
+for native Windows support — upstream is POSIX-only (`posix_openpt`, Unix
+sockets, `termios`, `SCM_RIGHTS`).
 
-muxkit is a lightweight terminal multiplexer written in C. It enables multiple terminal sessions to be created, accessed, and controlled from a single screen. muxkit sessions can be detached from the screen and continue running in the background, then later reattached.
+## What this fork changes
 
-### Features
+Same user-facing design as upstream — sessions, panes, scrollback, status bar,
+`Ctrl+B` prefix keys — with these differences:
 
-- ✨ **Session Management** - Create, detach, and reattach terminal sessions
-- 🪟 **Multiple Panes** - Split terminal window into multiple panes vertically
-- 📜 **Scrollback History** - Review terminal output with history scrolling
-- 🌏 **Internationalization** - Built-in English and Chinese language support
-- 🚀 **Lightweight** - Minimal dependencies, fast startup
-- 🔒 **Daemon Mode** - Server runs as background daemon
-- 💾 **Session Persistence** - Screen state preserved when detached
+**Platform**
 
-### Dependencies
+| | upstream `muxkit` | this fork |
+|---|---|---|
+| Windows | not supported (POSIX-only: `posix_openpt`, Unix sockets, `termios`, `SCM_RIGHTS`) | **native**, `ConPTY` + named pipes + console VT modes |
+| Unix | primary target | pty / `termios` / Unix domain socket; shares the same code, `cargo check`-verified but not yet run on Linux |
+| Language / build | C + CMake, vendored `libvterm` | Rust + Cargo; on Windows only the MSVC toolchain is needed |
 
-muxkit depends on the following libraries:
+**Architecture**
 
-- **libvterm** - Terminal emulator library (included in `vendor/`)
-- **Standard C Library** - POSIX-compliant system
+- **The daemon owns all terminal state.** Upstream's client owned the PTY and
+  its own grid, and passed file descriptors to the server with `SCM_RIGHTS` —
+  that cannot be expressed on Windows, so the fork inverted the model: the server
+  parses the VT stream and keeps the grid and scrollback for each pane, and the
+  client only draws frames and forwards input bytes. The remaining
+  platform-specific code is small and `cfg`-gated in `tty.rs`, `pty.rs`,
+  `ipc.rs`, `keys.rs` and `client.rs`; the protocol, terminal state, canvas and
+  key handling are shared. This is also what keeps a session's screen intact
+  across detach/attach.
+- **IPC is a length-prefixed JSON protocol** over a named pipe (Windows) or a
+  Unix domain socket (`interprocess`), instead of hand-written messages plus FD
+  passing. A frame is capped at 16 MiB; `MUXKIT_NAME` overrides the endpoint name
+  (used by the tests).
+- **Terminal emulation is `vte` + our own cell grid** instead of vendored
+  `libvterm`. Scrollback, SGR (including 256-color and RGB), DECSTBM, the
+  alternate screen (`?1049`), wide characters (CJK) and cursor state live in
+  [`src/term.rs`](src/term.rs). DA1 / DSR / CPR queries are answered back to the
+  child; upstream does not answer them, so a program that waits for such a reply
+  can block.
+- **Rendering is damage-based.** Upstream repainted the whole pane with one
+  `write()` per cell. Measured on this machine for an 80×24 pane: about 1,900
+  `write()` calls per frame, and about 7,900 to display one byte of shell output.
+  The fork composes panes, borders and the status bar into a canvas, diffs it row
+  by row against the previous frame, and each frame leaves the client as **one
+  buffered write** (in practice one `WriteFile` on Windows). See
+  [`src/canvas.rs`](src/canvas.rs) and [`src/server.rs`](src/server.rs).
 
-To build muxkit, you need:
-- C compiler (gcc or clang)
-- CMake 3.10 or higher
-- make
+**Features and behaviour**
 
-### Installation
+- Implemented: sessions (`new` / `list` / `attach` / `kill`), vertical pane
+  splits, scrollback, synchronized input, daemon mode, session persistence across
+  detach, `Ctrl+B` prefix, key bindings from a config file.
+- Input on Windows uses `ENABLE_VIRTUAL_TERMINAL_INPUT`, so both platforms feed
+  the same raw byte stream to the key state machine; there is no separate Windows
+  key-event path.
+- Window resizes are detected by polling, because Windows has no `SIGWINCH`.
+- The config path moved to `%LOCALAPPDATA%\muxkit\keybinds.conf` (Windows) /
+  `~/.config/muxkit/keybinds.conf` (Unix); upstream used
+  `~/.local/share/muxkit/muxkit-<uid>/keybinds.conf`. Upstream action names are
+  still accepted (`new_pane` is an alias for `split_vertical`), so an existing
+  `keybinds.conf` keeps working unchanged.
+- The daemon does not write `client.log` / `server.log`; it exits by itself after
+  3 s idle with no sessions and no clients.
+- **Not implemented from upstream:** the English/Chinese UI translation
+  (`i18n`) — status-bar text is English only. The other items in upstream's
+  feature list are implemented.
+- Absent in both versions, so not a regression: mouse support, copy-mode,
+  horizontal / `tmux`-style layouts, console reflow.
 
-#### Homebrew (macOS / Linux)
+**Binary and CLI**
 
-```bash
-brew tap LatosProject/muxkit https://github.com/LatosProject/muxkit.git
-brew install muxkit
+- The binary is `mk` (upstream: `muxkit`). `-l`, `-s <id>`, `-k <id>` and `-h`
+  match upstream; this fork adds `-S` (run the daemon in the foreground) and
+  `--shell <cmd>`.
+- Measured on this machine: release binary ≈ 981 KiB, idle daemon ≈ 10 MiB RSS.
+  The upstream C implementation, built here with `gcc -O2`, measured 131 KiB and
+  ≈ 1.3 MiB. The difference is the Rust runtime, `serde` and the ConPTY
+  plumbing; in exchange the VT parser, the grid and the canvas contain no
+  `unsafe` code, and Windows is a first-class target.
+
+## Build
+
+```powershell
+cargo build --release      # -> target\release\mk.exe
+cargo test                 # 67 unit tests + 2 integration tests
 ```
 
-#### AUR (Arch Linux)
+Windows needs only Rust (MSVC toolchain). ConPTY requires Windows 10 1809+.
 
-```bash
-# Using an AUR helper (e.g., yay)
-yay -S muxkit
+To type-check the Unix code paths from Windows (no linker needed):
 
-# Or manually
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit/aur
-makepkg -si
+```powershell
+rustup target add x86_64-unknown-linux-gnu
+cargo check --all-targets --target x86_64-unknown-linux-gnu
 ```
 
-#### Debian / Ubuntu
+## Use
 
-```bash
-# Build .deb package from source
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit
-dpkg-buildpackage -us -uc -b
-sudo dpkg -i ../muxkit_0.4.4-1_*.deb
+```powershell
+mk                 # new session (starts the daemon on first use)
+mk -l              # list sessions
+mk -s 0            # attach to session 0
+mk -k 0            # kill session 0
 ```
 
-#### Fedora / RHEL
+Keys (prefix = `Ctrl+B`):
 
-```bash
-# Install build dependencies
-sudo dnf install cmake gcc make
+| key | action |
+|---|---|
+| `prefix d` | detach |
+| `prefix %` | split pane (vertical) |
+| `prefix o` | next pane |
+| `prefix [` / `]` | scrollback up / down |
+| `prefix s` | toggle synchronized input |
+| `prefix q` | kill session |
+| `Ctrl+B Ctrl+B` | send a literal `Ctrl+B` |
 
-# Build and install from source
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-sudo install -m 755 build/muxkit /usr/local/bin/muxkit
-```
+Bindings can be overridden in `%LOCALAPPDATA%\muxkit\keybinds.conf`; see
+[`keybinds.conf.example`](keybinds.conf.example):
 
-#### From Source
-
-To build and install muxkit from source:
-
-```bash
-# Clone the repository
-git clone https://github.com/LatosProject/muxkit.git
-cd muxkit
-
-# Build
-cmake -B build -S .
-cmake --build build
-
-# Install (optional)
-sudo cp build/muxkit /usr/local/bin/
-```
-
-#### Platform-Specific Notes
-
-- **macOS**: Works out of the box with Xcode Command Line Tools
-- **Linux**: Requires build-essential package
-
-### Usage
-
-#### Basic Commands
-
-```bash
-# Start a new session
-muxkit
-
-# List all sessions
-muxkit -l
-
-# Attach to a detached session (session ID 0)
-muxkit -s 0
-
-# Kill a session
-muxkit -k 0
-
-# Show help
-muxkit -h
-```
-
-#### Key Bindings
-
-All commands are prefixed with `Ctrl+B`:
-
-| Key Combination | Action |
-|----------------|--------|
-| `Ctrl+B` `d` | Detach from current session |
-| `Ctrl+B` `%` | Split pane vertically |
-| `Ctrl+B` `o` | Switch to next pane |
-| `Ctrl+B` `[` | Scroll up (view history) |
-| `Ctrl+B` `]` | Scroll down |
-| `Ctrl+B` `s` | Toggle synchronized input mode |
-| `Ctrl+B` `Ctrl+B` | Send literal Ctrl+B to shell |
-
-**Note**: Press `Esc` or `q` to exit scroll mode.
-
-### Configuration
-
-Configuration files are located in `~/.local/share/muxkit/muxkit-<uid>/`:
-- `keybinds.conf` - Custom key bindings (optional)
-
-Example `keybinds.conf`:
 ```
 prefix d detach_session
-prefix % new_pane
-prefix o next_pane
-prefix [ scroll_up
-prefix ] scroll_down
+prefix % split_vertical
 ```
 
-Available actions:
-- `detach_session` - Detach from session
-- `new_pane` - Create new pane
-- `next_pane` - Switch to next pane
-- `scroll_up` - Scroll up to view history
-- `scroll_down` - Scroll down
-- `sync_input` - Toggle synchronized input mode (bar cursor)
-
-### Project Structure
+## Architecture
 
 ```
-muxkit/
-├── src/
-│   ├── core/       # Main entry point
-│   ├── client/     # Client-side logic
-│   ├── server/     # Server daemon
-│   ├── ui/         # Rendering and input
-│   └── common/     # Shared utilities
-├── include/        # Header files
-├── vendor/         # Third-party libraries (libvterm)
-└── CMakeLists.txt  # Build configuration
+   terminal (Windows Terminal / conhost / xterm)
+        │  ANSI frames (row deltas only)        ▲ raw input bytes
+        ▼                                       │
+   ┌─────────────────────── client (mk) ───────┴────────────┐
+   │  tty.rs: raw VT mode, alt screen, size polling         │
+   │  keys.rs: Ctrl+B state machine                         │
+   └───────────────┬────────────────────────────────────────┘
+                   │ local IPC: named pipe / Unix domain socket
+                   │ length-prefixed JSON frames (proto.rs)
+                   ▼
+   ┌─────────────────────── server daemon ──────────────────┐
+   │  server.rs: single owner of every session              │
+   │  term.rs:   VT parser -> cell grid + scrollback        │
+   │  canvas.rs: compose panes/borders/status bar, diff     │
+   │  pty.rs:    ConPTY / pty child + reader thread         │
+   └───────────────┬────────────────────────────────────────┘
+                   ▼
+              shell (pwsh.exe / bash)
 ```
 
-### Architecture
+Most Windows specifics live in [`src/tty.rs`](src/tty.rs) (console modes +
+`ENABLE_VIRTUAL_TERMINAL_*`, so input and output are plain VT byte streams) and
+[`src/pty.rs`](src/pty.rs) (portable-pty's ConPTY backend); the rest of the
+platform split is the small `cfg`-gated code in `client.rs`, `ipc.rs` and
+`keys.rs`.
+
+## Layout
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                     Terminal                         │
-└──────────────────────────────────────────────────────┘
-                        │
-                        ▼
-┌──────────────────────────────────────────────────────┐
-│                 Client Process                       │
-│  ┌────────┐  ┌──────────┐  ┌──────────────────────┐  │
-│  │ Raw    │  │ Event    │  │ Signal Handler       │  │
-│  │ Mode   │  │ Loop     │  │ (SIGWINCH/SIGCHLD)   │  │
-│  └────────┘  └──────────┘  └──────────────────────┘  │
-└──────────────────────────────────────────────────────┘
-                        │
-              Unix Domain Socket
-                        │
-                        ▼
-┌──────────────────────────────────────────────────────┐
-│              Server Process (Daemon)                 │
-│  ┌────────┐  ┌──────────┐  ┌──────────────────────┐  │
-│  │Session │  │ Event    │  │ Child Monitor        │  │
-│  │Manager │  │ Loop     │  │ (SIGCHLD)            │  │
-│  └────────┘  └──────────┘  └──────────────────────┘  │
-└──────────────────────────────────────────────────────┘
-                        │
-                  PTY Master/Slave
-                        │
-                        ▼
-┌──────────────────────────────────────────────────────┐
-│                  Shell Process                       │
-│                 (bash/zsh/sh)                        │
-└──────────────────────────────────────────────────────┘
+src/main.rs      CLI
+src/client.rs    attach/detach/list/kill, frame drawing, input forwarding
+src/server.rs    daemon engine, sessions, panes, frame pump
+src/proto.rs     shared cell model + wire messages  (the contract)
+src/term.rs      VT emulation: grid, SGR, scrollback, alt screen, query replies
+src/canvas.rs    canvas composition, row diff, ANSI encoder
+src/pty.rs       PTY/ConPTY child management
+src/tty.rs       raw console, VT modes, size, resize watcher
+src/keys.rs      prefix keybindings + config file
+src/ipc.rs       named pipe / UDS transport + framing
+src/layout.rs    pane rectangles
+tests/e2e.rs     daemon protocol, detach/reattach persistence
+tests/client_e2e.rs  the real client inside a real ConPTY
 ```
 
-### Contributing
+## Verification
 
-Bug reports, feature suggestions, and code contributions are welcome!
-
-Please open a GitHub issue or pull request at:
 ```
-https://github.com/LatosProject/muxkit
+cargo test          # 67 unit tests + 2 integration tests, all green on Windows
 ```
 
-Before contributing:
-1. Read the code style in existing files
-2. Add appropriate comments and documentation
-3. Test your changes thoroughly
+- [`tests/e2e.rs`](tests/e2e.rs) — real daemon over real IPC: attach → `echo` →
+  detach → reattach, asserting the marker text is still on screen after
+  reattaching (session persistence), then a clean shutdown.
+- [`tests/client_e2e.rs`](tests/client_e2e.rs) — the real `mk` client running
+  inside a real **ConPTY**, with its ANSI output parsed back by `term.rs`: asserts
+  that the status bar is painted, typed input reaches the shell, output comes
+  back, `Ctrl+B %` opens a second pane, `Ctrl+B o` moves focus, and `Ctrl+B d`
+  detaches while the daemon keeps the session.
+- Unit tests cover the VT parser (SGR / erase / scrollback / wide characters /
+  alternate screen, CPR + DA1 replies), the canvas diff and ANSI encoder (one
+  escape per run, not per cell), the prefix state machine, config parsing and the
+  IPC framing.
 
-### Documentation
+A screen dump captured from that ConPTY run (PowerShell 7 inside two panes):
 
-For detailed API documentation, see the header files in `include/`:
-- `window.h` - Window and pane management
-- `render.h` - Terminal rendering
-- `client.h` - Client state machine
-- `server.h` - Server daemon
-
-Generate Doxygen documentation:
-```bash
-doxygen Doxyfile
+```
+PowerShell 7.6.8                        │
+PS C:\Users\me> echo CLIENT_SIDE_OK     │
+CLIENT_SIDE_OK                          │
+PS C:\Users\me>                         │
+ mk | session 0 | pane 1/2 | 2 panes | C:\Program Files\WindowsApps\Microsoft.Po
 ```
 
-### Debugging
+## Status / known limits
 
-Run muxkit with verbose logging. Log files will be created in `~/.local/share/muxkit/muxkit-<uid>/`:
-- `client.log` - Client log
-- `server.log` - Server log
+- Unix support shares the whole codebase and passes
+  `cargo check --all-targets --target x86_64-unknown-linux-gnu`, but has not been
+  built or run on a real Linux machine yet (this fork was developed on Windows).
+- Vertical splits only (same as upstream); no mouse, no copy-mode pager.
+- Reflow on resize is truncate/pad, not word reflow.
+- One attached client per session (a new attach detaches the old one), like tmux.
+- OSC 52 clipboard and hyperlinks are parsed but ignored.
 
-Check logs for debugging:
-```bash
-tail -f ~/.local/share/muxkit/muxkit-$(id -u)/client.log
-tail -f ~/.local/share/muxkit/muxkit-$(id -u)/server.log
-```
+## Licence
 
-### Technical Details
+MIT. Original `muxkit` © 2024 [LatosProject](https://github.com/LatosProject);
+this fork © 2026 南清 (NanQing). Both notices are kept in [LICENSE](LICENSE); no
+upstream source code is included.
 
-| Technology | Description |
-|------------|-------------|
-| **PTY (Pseudo-terminal)** | Virtual terminal pairs using `posix_openpt`, `grantpt`, `ptsname` |
-| **Unix Domain Sockets** | Local IPC between client and server |
-| **FD Passing** | Cross-process file descriptor passing via `SCM_RIGHTS` |
-| **Signal Handling** | `SIGCHLD` for child monitoring, `SIGWINCH` for window resize |
-| **Daemon Process** | Double-fork pattern for background service |
-| **termios** | Raw mode terminal control |
-| **libvterm** | Terminal emulation library |
-
-### License
-
-MIT License - Copyright (c) 2024 LatosProject
-
-See [LICENSE](LICENSE) file for details.
-
----
-
-**Version**: 0.4.4
-**Author**: LatosProject
-**Homepage**: https://github.com/LatosProject/muxkit
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
